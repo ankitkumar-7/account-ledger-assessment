@@ -62,6 +62,14 @@ public final class Replay {
         throw new IllegalArgumentException("No event " + eventId + " in the stream");
     }
 
+    /** Processes events until the first one stamped after {@code day}, then closes {@code day}. */
+    public void runThroughEndOfDay(int day) {
+        while (cursor < events.size() && events.get(cursor).day() <= day) {
+            step();
+        }
+        closeDaysThrough(day);
+    }
+
     public void runToEnd() {
         while (cursor < events.size()) {
             step();
