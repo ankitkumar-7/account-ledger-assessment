@@ -1,6 +1,6 @@
 package ledger;
 
-public enum EntryType {
+public enum JournalType {
     CREDIT,
     DEBIT,
     SETTLEMENT,

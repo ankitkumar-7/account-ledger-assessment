@@ -1,10 +1,11 @@
 package ledger;
 
-import java.math.BigDecimal;
+public record Account(String id, Currency currency, AccountKind kind) {
 
-public record Account(String id, Currency currency, BigDecimal openingBalance) {
-
-    public Account {
-        openingBalance = currency.normalise(openingBalance);
+    public enum AccountKind {
+        /** A customer deposit account. */
+        CUSTOMER,
+        /** A bank-side general-ledger account: the counter-side of customer postings. */
+        INTERNAL
     }
 }
