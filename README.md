@@ -98,3 +98,4 @@ src/test/java/ledger/
 | `AMBIGUITIES.md` | every ambiguity found and how it was resolved |
 | `REJECTED.md` | refused acceptance criteria with reasons, and approaches abandoned mid-build |
 | `WORKLOG.md` | timestamped work log |
+| `docs/architecture-and-trade-offs.pdf` | Part 2 architecture document (source `docs/architecture.html`, rebuilt with `docs/render-pdf.sh`) |

@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ledger Architecture and Trade-offs</title>
+<style>
+  :root {
+    --ink: #1b1f24;
+    --muted: #5a6370;
+    --rule: #d6dbe1;
+    --head: #f2f4f7;
+    --accent: #0b5cad;
+    --bg: #ffffff;
+  }
+  @page { size: A4; margin: 15mm 16mm 15mm 16mm; }
+  html { background: var(--bg); }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font: 9.6pt/1.42 -apple-system, "Helvetica Neue", Arial, sans-serif;
+    max-width: 180mm;
+    margin: 0 auto;
+    padding: 0 16px;
+  }
+  @media print { body { padding: 0; } }
+  h1 { font-size: 16pt; margin: 0 0 2px; }
+  .sub { color: var(--muted); margin: 0 0 10px; }
+  h2 {
+    font-size: 11.5pt;
+    color: var(--accent);
+    border-bottom: 1px solid var(--rule);
+    padding-bottom: 2px;
+    margin: 14px 0 6px;
+    break-after: avoid;
+  }
+  h3 { font-size: 10pt; margin: 9px 0 3px; break-after: avoid; }
+  p { margin: 0 0 6px; }
+  ul { margin: 0 0 6px; padding-left: 16px; }
+  li { margin: 0 0 2px; }
+  table { width: 100%; border-collapse: collapse; margin: 4px 0 8px; font-size: 8.7pt; }
+  th, td { border: 1px solid var(--rule); padding: 3px 5px; vertical-align: top; text-align: left; }
+  th { background: var(--head); font-weight: 600; }
+  tr { break-inside: avoid; }
+  code { font: 8.6pt/1.3 Menlo, Consolas, monospace; background: var(--head); padding: 0 2px; border-radius: 2px; }
+  .callout { border-left: 3px solid var(--accent); background: var(--head); padding: 5px 8px; margin: 6px 0 8px; }
+  .table-wrap { overflow-x: auto; }
+</style>
+</head>
+<body>
+
+<h1>In-memory Ledger: Architecture and Trade-offs</h1>
+<p class="sub">Ankit Kumar · companion to the ledger repository (see DECISIONS.md for the full decision log)</p>
+
+<p>The ledger is a bitemporal, append-only, double-entry store. Every journal carries a value day
+(which day's balance it belongs to) and a booked day plus global sequence (when the system learned of
+it). Holds live in a separate append-only authorization log and never touch the money ledger. A single
+synchronized writer validates each event completely before appending, so every event is all-or-nothing.
+Current ledger balance and active holds are a write-through cache updated inside the append; value-dated
+daily closings are folded from the log because back-valued entries rewrite them; a reconciliation pass
+proves cache equals fold and that every currency nets to zero.</p>
+
+<h2>1. Append-only at scale</h2>
+
+<h3>Where the design accumulates unbounded state</h3>
+<div class="table-wrap"><table>
+  <tr><th>State</th><th>Grows with</th><th>How it is read today</th></tr>
+  <tr><td>Journal list</td><td>every posting, forever</td><td><code>closingBalance</code> scans the whole list, all accounts, on every call</td></tr>
+  <tr><td>Fee look-back</td><td>age of the ledger</td><td>each end of day re-checks every day from Day 1 to today</td></tr>
+  <tr><td>Authorization log</td><td>every lifecycle record</td><td>latest state rebuilt by scanning all records on every authorization and settlement</td></tr>
+  <tr><td>Seen event ids</td><td>every event ever received</td><td>hash set, never expires</td></tr>
+  <tr><td>Rejections</td><td>every refusal</td><td>scanned linearly to de-duplicate end-of-day errors</td></tr>
+</table></div>
+
+<h3>What breaks first at 100× volume</h3>
+<p><b>The end-of-day fee run, not memory.</b> It calls <code>closingBalance</code> once per account per
+elapsed day, and each call scans the entire, un-partitioned journal list. Cost per end of day is roughly
+<i>accounts × days elapsed × total journals</i>. With 100× accounts and 100× journals the work per close
+grows about 10,000×, and it keeps growing every day because the look-back starts at Day 1. The batch
+overruns its window long before memory is exhausted: fees and interest post late, and the next day's
+authorizations run against a ledger whose end-of-day state is incomplete. The single writer is not the
+first bottleneck: an in-memory append is microseconds, and the authorization path already reads O(1)
+cached balances.</p>
+
+<h3>Cheapest structural change that defers it</h3>
+<div class="callout"><b>A per-account, per-value-day net-movement index, maintained write-through.</b>
+On append, add each posting's amount to <code>bucket[account][valueDay]</code> inside the same atomic
+step that already updates the balance cache. A closing balance becomes a prefix sum over at most
+<i>days</i> buckets instead of a scan over all journals; a back-valued entry updates exactly one bucket,
+so restatement stays correct by construction. The fee run drops from <i>A × D × J</i> to <i>A × D</i>,
+and <code>reconcile()</code> extends naturally to "index equals fold".</div>
+<p>This defers the problem rather than removing it: <i>D</i> still grows. The next step is a
+<b>back-valuation horizon</b> (see §2): once no entry may be value-dated before day <i>H</i>, everything
+up to <i>H</i> is sealed into one carried-forward balance per account, the look-back becomes bounded,
+and sealed journals move to cold storage. That is archiving, not deletion; the log stays append-only.
+Seen event ids get the same treatment: retained for a window at least as long as the longest upstream
+retry, then expired.</p>
+
+<h2>2. Value-dated entries in production</h2>
+<p>A value-dated entry changes a balance that other processes have already consumed. In a UAE-licensed
+bank, each of those consumers is an operational or regulatory exposure.</p>
+<div class="table-wrap"><table>
+  <tr><th>Surface</th><th>What a back-valued entry does to it</th></tr>
+  <tr><td>Fees and interest</td><td>Retroactively creates or removes fee triggers and changes interest accrued on past days. This build shows both: fees appear for days that had already closed, and interest is computed on restated balances.</td></tr>
+  <tr><td>Customer statements and conduct</td><td>Balances on statements already sent no longer match the account. Fees triggered, or left standing, by an entry later reversed are a fair-treatment and fee-transparency issue under the Central Bank of the UAE's consumer protection framework, and a likely complaint.</td></tr>
+  <tr><td>Decisions already taken</td><td>Authorization approvals and declines were made on the balance known at the time and cannot be re-run. A customer can be declined because of a debit that is later reversed.</td></tr>
+  <tr><td>Accounting period close</td><td>An entry dated into a closed month changes figures already closed in the general ledger and the sub-ledger to GL reconciliation, and potentially financial reporting.</td></tr>
+  <tr><td>Regulatory returns</td><td>Returns to the Central Bank are struck on balances at reporting dates; back-valuing into a reported period means explaining or resubmitting differences.</td></tr>
+  <tr><td>AML/CFT</td><td>Back-dating moves the apparent timeline of funds. Transaction monitoring must evaluate on both value time and booking time, and both, plus who approved the back-dating, must be retained for the statutory record-keeping period under the UAE AML law (Federal Decree-Law No. 20 of 2018).</td></tr>
+  <tr><td>Calendar</td><td>Value dates must respect the UAE Saturday–Sunday weekend, public holidays, cut-off times, scheme settlement dates and FX value dates for non-AED currencies. The model has integer days only.</td></tr>
+  <tr><td>Internal fraud</td><td>Back-valuation is a classic manipulation channel: dating an entry so an account looks funded on a reporting date, earns interest, or avoids a fee.</td></tr>
+</table></div>
+<div class="callout"><b>Control to add before go-live: a back-valuation approval gate.</b> Any entry whose value
+date is more than one business day before its booking date, or falls in a closed statement or accounting
+period, is held as pending instead of posted. Posting requires maker-checker approval with a reason code.
+On approval the system automatically computes and records the customer impact (fees triggered or removed,
+interest difference) and routes any refund decision; every such entry appears on a daily exception
+report reviewed by operations and compliance. The same threshold is the horizon that makes §1's sealing
+possible.</div>
+
+<h2>3. Authorization lifecycle</h2>
+<p>In this model an authorization has three states and only two outcomes that end it:
+<b>DECLINED</b> at request and <b>SETTLED</b>. Every other way a real authorization ends leaves an
+<b>APPROVED</b> hold active forever, reducing available balance indefinitely. That is the most important
+gap to close.</p>
+<div class="table-wrap"><table>
+  <tr><th>Ending</th><th>What the model does today</th><th>Real-world scenario</th><th>Behaviour I would mandate</th></tr>
+  <tr><td>Declined</td><td>DECLINED record with the balances it was decided on; never holds funds</td><td>Insufficient funds; also a decline caused by a debit later reversed</td><td>Final for that request. If a back-valued correction later shows the decline was caused by bank error, flag it in the customer-impact review; never retro-approve.</td></tr>
+  <tr><td>Settled for less than the hold</td><td>Settles, releases the whole hold</td><td>Final amount lower: fuel, hotel, restaurant</td><td>Release the remainder immediately, unless the authorization is flagged for multi-capture (split shipment), in which case keep it until the final capture or expiry.</td></tr>
+  <tr><td>Never settled</td><td>Stays APPROVED forever</td><td>Merchant never captures: cancelled order, abandoned pre-authorization, deposit</td><td>Expiry by merchant category (shorter for retail, longer for hotel and car rental, per scheme rules): new EXPIRED record, hold released. A later presentment is accepted and flagged as late, not rejected.</td></tr>
+  <tr><td>Merchant reversal</td><td>Not modelled; hold stays</td><td>Customer cancels; terminal timeout reversal</td><td>An authorization-reversal event (full or partial) that releases the hold, idempotent on the network message id.</td></tr>
+  <tr><td>Settlement above the hold</td><td>Settlement refused; hold stays active</td><td>Tips, incremental charges</td><td>Tolerance by merchant category. Above it, post the presentment (the issuer is already liable to the scheme), release the hold and raise a dispute case, instead of leaving both a refused settlement and a stale hold.</td></tr>
+  <tr><td>Settlement refused for another reason</td><td>Wrong account, already settled, or declined: refused; any hold untouched</td><td>Duplicate presentment; mis-routed clearing record</td><td>Exact duplicates rejected idempotently; everything else goes to a suspense account and exception queue with an SLA, never silently dropped.</td></tr>
+  <tr><td>Card or account blocked</td><td>Not modelled</td><td>Lost card, account closure</td><td>Block new authorizations; existing holds remain until settled or expired; settlements against them are still honoured.</td></tr>
+</table></div>
+<p>The mirror case, a settlement with no authorization at all, is refused in this build. In production it
+is a legitimate force-post or late presentment and belongs in the same suspense-and-review path.</p>
+
+<h2>4. What I cut and why</h2>
+<div class="table-wrap"><table>
+  <tr><th>Simplification</th><th>Why it was cut</th><th>Production risk it defers</th></tr>
+  <tr><td>No persistence or durability</td><td>Out of scope by brief</td><td>A crash loses the ledger. Needs a durable event store with write-ahead logging; the cache must be rebuilt from it on start.</td></tr>
+  <tr><td>One global synchronized writer</td><td>Simplest correct answer to the check-then-hold race</td><td>Throughput ceiling. Production: one writer per account partition; multi-account transfers then need a coordination protocol.</td></tr>
+  <tr><td>Reconciliation in the same process</td><td>Proves the cache logic</td><td>Cannot detect storage corruption. Production reconciles independent stores (ledger vs GL vs scheme files).</td></tr>
+  <tr><td>Integer days, no timestamps or calendar</td><td>The window is six abstract days</td><td>Wrong value dates around weekends, holidays and cut-offs; no time zone handling.</td></tr>
+  <tr><td>No FX</td><td>No rates in scope</td><td>The AED fee cannot be booked on a BHD account; it is recorded as an error instead.</td></tr>
+  <tr><td>No hold expiry, authorization reversal, incremental or multi-capture</td><td>Not in the event stream</td><td>Holds leak forever (§3).</td></tr>
+  <tr><td>No fee waiver or refund on reversal</td><td>No rule authorises it; it is policy</td><td>Customers pay fees caused by entries later reversed: conduct and complaint risk (the deliberately failing test).</td></tr>
+  <tr><td>Unbounded back-valuation, no period close</td><td>Six-day window</td><td>Unbounded look-back cost (§1) and uncontrolled restatement (§2).</td></tr>
+  <tr><td>Unlimited overdraft on posted debits</td><td>Only authorizations are gated by the rules</td><td>No overdraft limit, no credit risk control on posted debits.</td></tr>
+  <tr><td>Simple interest model</td><td>Daily rate given directly</td><td>No day-count convention, tiering, tax or accrual booking; accruals exist only at capitalisation.</td></tr>
+  <tr><td>Reversal of credits and debits only, whole journal</td><td>Enough for the stream</td><td>No partial reversal, settlement reversal or chargeback flow.</td></tr>
+  <tr><td>In-memory idempotency set; rejected ids are burned</td><td>Cheap protection against double posting</td><td>Grows forever; a corrected message must carry a new id.</td></tr>
+  <tr><td>No access control, maker-checker or tamper evidence</td><td>No users in scope</td><td>Anyone with code access can append; no hash chain to prove history was not altered outside the API.</td></tr>
+  <tr><td>Global constants, no product configuration</td><td>One product in scope</td><td>Fee, rate and tolerance cannot vary by product or customer segment.</td></tr>
+</table></div>
+
+</body>
+</html>
