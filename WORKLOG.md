@@ -4,7 +4,7 @@ Times are local (IST). AI assistance (Claude Code) is noted where used, as permi
 
 ## 2026-10-06
 
-- **23:00** Read the brief (Part 1 build + Part 2 architecture document).
+- **Before 23:05** Read the brief (Part 1 build + Part 2 architecture document).
 - **23:05–23:23** Design pass with AI assistant: hand-replayed the event stream on paper, day by day,
   separating processing day from value date. Key findings:
   - E7 (backdated to Day 2) turns Day 2, Day 4 and Day 5 negative, so three overdraft fees, not one.
@@ -40,3 +40,42 @@ Times are local (IST). AI assistance (Claude Code) is noted where used, as permi
 - **23:49** REJECTED.md, AMBIGUITIES.md, NUMBERS.md, README. While writing NUMBERS.md I checked the
   sensitivity of the given fee: at 50.00 Day 3 would go to −20.00 and cause a fourth fee, which is
   why fees are assessed day by day in order.
+
+## 2026-10-07
+
+- **00:53–01:42** Walked through the code file by file with the AI assistant to make sure I can
+  explain every part without it: the layering (replay drives time, engine decides, ledger records),
+  the precision gate, journal structure and sign convention, the write-through cache and
+  `reconcile()`, the fee loop's day-by-day cascade, interest capitalisation and the replay clock.
+  Noted weak spots to own in the defense: an event id is marked as seen before validation (a
+  rejected id cannot be reused), a settlement is two appends that are only atomic because of the
+  single writer, and in-process reconciliation catches cache-logic bugs but not storage corruption.
+- **00:59** The IDE showed unresolved symbols everywhere although `./run.sh` compiled cleanly.
+  Cause: IntelliJ still treated `src/` as the source root and only had JDK 17 registered. Added a
+  local module configuration (`src/main/java` and `src/test/java` as roots, Java 21). IDE files are
+  gitignored, so the repository is unchanged.
+- **02:01** Ran the replay and the suite end to end and re-read the day-by-day output against my
+  hand replay.
+- **02:02–02:05** Architecture & Trade-offs document (Part 2), drafted with the AI assistant from
+  the decision log, REJECTED.md and the code: the first bottleneck at 100× volume (the end-of-day
+  fee run scans every journal for every account and every day, not memory), the per-value-day index
+  as the cheapest fix, the back-valuation approval gate as the control for value-dated entries, every
+  way an authorization ends without a matching settlement (in this model only DECLINED and SETTLED
+  end one; everything else leaves a hold forever), and what was cut. Written as HTML and rendered
+  to a 3-page PDF with headless Chrome.
+
+## 2026-10-08
+
+- **16:23–16:36** Prepared the submission. The commits carried my work identity, because this
+  laptop's global git config is set up for work. Before the first push I rewrote the author and
+  committer name and email on all commits to my personal identity, keeping every original
+  timestamp and message (checked against a snapshot taken before the rewrite; no commits squashed or
+  dropped). Set the identity locally for this repository only. Created the public GitHub repository
+  and pushed over HTTPS with a short-lived token, leaving the laptop's work GitHub login and SSH
+  key untouched.
+- **16:36–16:41** Verified the push: the remote head matches local, all commits are present with
+  the right author and dates, and a fresh clone runs (`17 passed, 1 failed (0 unexpected)`, final
+  balances 390.93 AED and 10.008 BHD).
+- **16:39** Removed the outdated "Next" list from this log.
+- **16:43** Filled in the missing entries above, using timestamps from the AI session log, the git
+  reflog and the push log rather than memory.
