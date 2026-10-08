@@ -40,8 +40,3 @@ Times are local (IST). AI assistance (Claude Code) is noted where used, as permi
 - **23:49** REJECTED.md, AMBIGUITIES.md, NUMBERS.md, README. While writing NUMBERS.md I checked the
   sensitivity of the given fee: at 50.00 Day 3 would go to −20.00 and cause a fourth fee, which is
   why fees are assessed day by day in order.
-
-### Next
-- Re-derive every number by hand without the AI, in preparation for the live defense.
-- Architecture & Trade-offs document (Part 2, PDF).
-- Create the GitHub repository and push the full history.
